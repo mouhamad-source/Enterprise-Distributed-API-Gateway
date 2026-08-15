@@ -1,0 +1,66 @@
+# Build folders
+bin/
+obj/
+debug/
+release/
+
+# Python build and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Logs
+*.log
+
+# Config files (local only)
+appsettings.json
+application.json
+secrets.json
+
+# VS cache and settings
+.vs/
+.vscode/
+*.dbmdl
+*.jfm
+
+# NuGet packages
+*.nupkg
+packages/
+*.snupkg
+
+# DotNet tools
+project.lock.json
+project.fragment.lock.json
+
+# Test results
+TestResult.xml
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# Other generated files
+*.bak
+*.tmp
+*.swp
+*.orig
+
+# JetBrains Rider / ReSharper
+.idea/
+*.DotSettings.user
+
+# OS-specific
+Thumbs.db
+.DS_Store
