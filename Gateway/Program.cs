@@ -13,10 +13,9 @@ builder.Services.AddHttpClient("GatewayClient", client =>
 {
 
 });
-builder.Services.AddHttpClient("GatewayClient"); 
 
 builder.Services.AddSingleton<RedisConnectionManager>();
-builder.Services.AddSingleton<IRateLimiter, RedisRateLimiter>();
+builder.Services.AddSingleton<IRateLimiter, RateLimiterService>();
 
 // builder.Services.AddSingleton<IRateLimiter, MemoryRateLimiter>();
 builder.Services.AddSingleton<IPResolver>();

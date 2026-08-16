@@ -6,6 +6,7 @@ using Gateway.RateLimiting;
 using Gateway.Interface.RateLimiting;
 using StackExchange.Redis;
 using Gateway.Identification;
+
 namespace Gateway.Middleware;
 
 public class GatewayMiddleware
@@ -15,15 +16,15 @@ public class GatewayMiddleware
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly IRateLimiter _rateLimiter;
-    private readonly IClientIdentifierResolver _identifierResolver; 
+    private readonly IClientIdentifierResolver _identifierResolver;
+
     public GatewayMiddleware(
         RequestDelegate next,
         ILogger<GatewayMiddleware> logger,
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
-        IRateLimiter rateLimiter, 
-        IClientIdentifierResolver identifierResolver
-        )
+        IRateLimiter rateLimiter,
+        IClientIdentifierResolver identifierResolver)
     {
         _next = next;
         _logger = logger;
@@ -35,15 +36,15 @@ public class GatewayMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-
-        var clientId = _identifierResolver.Resolve(context); 
-        if (clientId == null )
+        var clientId = _identifierResolver.Resolve(context);
+        if (clientId == null)
         {
             _logger.LogWarning("Unable to identify client, rejecting request.");
-            context.Response.StatusCode = 401;
+            context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
             await context.Response.WriteAsync("Client identification required.");
             return;
         }
+
         try
         {
             var allowed = _rateLimiter.IsRequestAllowed(clientId, out var currentCount);
@@ -51,7 +52,7 @@ public class GatewayMiddleware
             {
                 _logger.LogWarning("Rate limit exceeded for {ClientType}:{ClientValue}. Count: {Count}",
                     clientId.Type, clientId.Value, currentCount);
-                context.Response.StatusCode = 429;
+                context.Response.StatusCode = (int)HttpStatusCode.TooManyRequests;
                 context.Response.Headers["Retry-After"] = "60";
                 await context.Response.WriteAsync("429 Too Many Requests - Rate limit exceeded.");
                 return;
@@ -61,12 +62,12 @@ public class GatewayMiddleware
         }
         catch (Exception ex) when (ex is RedisConnectionException || ex is TimeoutException)
         {
-            
             _logger.LogError(ex, "Rate limiter unavailable (Redis down). Rejecting request.");
-            context.Response.StatusCode = 503;
+            context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
             await context.Response.WriteAsync("503 Service Unavailable - Rate limiter unavailable.");
             return;
         }
+
         var requestPath = context.Request.Path.Value ?? "/";
         var targetBaseUrl = GetTargetUrl(requestPath);
 
@@ -83,15 +84,14 @@ public class GatewayMiddleware
 
         try
         {
-
             var client = _httpClientFactory.CreateClient("GatewayClient");
-            client.Timeout = TimeSpan.FromSeconds(2); // المهلة 2 ثانية
-
+            client.Timeout = TimeSpan.FromSeconds(2);
             var targetUri = new Uri(new Uri(targetBaseUrl), requestPath);
             var proxyRequest = new HttpRequestMessage(
                 new HttpMethod(context.Request.Method),
                 targetUri);
 
+            // Copy request headers, excluding Host
             foreach (var header in context.Request.Headers)
             {
                 if (header.Key.Equals("Host", StringComparison.OrdinalIgnoreCase))
@@ -99,6 +99,7 @@ public class GatewayMiddleware
                 proxyRequest.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
             }
 
+            // Copy request body
             if (context.Request.ContentLength > 0)
             {
                 using var stream = new MemoryStream();
@@ -114,23 +115,30 @@ public class GatewayMiddleware
                 }
             }
 
-
-            using var proxyResponse = await client.SendAsync(proxyRequest, HttpCompletionOption.ResponseHeadersRead, context.RequestAborted);
-
+            using var proxyResponse = await client.SendAsync(
+                proxyRequest,
+                HttpCompletionOption.ResponseHeadersRead,
+                context.RequestAborted);
 
             context.Response.StatusCode = (int)proxyResponse.StatusCode;
 
-
+            // Copy response headers safely (filtering hop-by-hop headers)
             foreach (var header in proxyResponse.Headers)
             {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
+                if (IsAllowedResponseHeader(header.Key))
+                {
+                    context.Response.Headers[header.Key] = header.Value.ToArray();
+                }
             }
             foreach (var header in proxyResponse.Content.Headers)
             {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
+                if (IsAllowedResponseHeader(header.Key))
+                {
+                    context.Response.Headers[header.Key] = header.Value.ToArray();
+                }
             }
 
-
+            // Copy response body stream
             if (proxyResponse.Content is not null)
             {
                 await proxyResponse.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
@@ -158,11 +166,18 @@ public class GatewayMiddleware
         }
     }
 
+    private static bool IsAllowedResponseHeader(string headerName)
+    {
+        return !headerName.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase)
+            && !headerName.Equals("Connection", StringComparison.OrdinalIgnoreCase)
+            && !headerName.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase)
+            && !headerName.Equals("Upgrade", StringComparison.OrdinalIgnoreCase);
+    }
+
     private string? GetTargetUrl(string requestPath)
     {
         var routes = _configuration.GetSection("Routes").Get<Dictionary<string, string>>();
         if (routes is null) return null;
-
 
         foreach (var route in routes)
         {
