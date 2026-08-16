@@ -1,12 +1,12 @@
 using System.Net;
-using System.Text;
-using Microsoft.Extensions.Options;
-using Gateway.Configuration;
-using Gateway.RateLimiting;
-using Gateway.Interface.RateLimiting;
-using StackExchange.Redis;
-using Gateway.Identification;
 using Gateway.Authentication;
+using Gateway.Identification;
+using Gateway.Interface.RateLimiting;
+using Gateway.RateLimiting;
+using Gateway.Resilience;
+using Polly;
+using Polly.CircuitBreaker;
+using StackExchange.Redis;
 
 namespace Gateway.Middleware;
 
@@ -18,6 +18,7 @@ public class GatewayMiddleware
     private readonly IConfiguration _configuration;
     private readonly IRateLimiter _rateLimiter;
     private readonly IClientIdentifierResolver _identifierResolver;
+    private readonly IServiceResiliencePolicy _resiliencePolicy;
 
     public GatewayMiddleware(
         RequestDelegate next,
@@ -25,7 +26,8 @@ public class GatewayMiddleware
         IHttpClientFactory httpClientFactory,
         IConfiguration configuration,
         IRateLimiter rateLimiter,
-        IClientIdentifierResolver identifierResolver)
+        IClientIdentifierResolver identifierResolver,
+        IServiceResiliencePolicy resiliencePolicy)
     {
         _next = next;
         _logger = logger;
@@ -33,40 +35,56 @@ public class GatewayMiddleware
         _configuration = configuration;
         _rateLimiter = rateLimiter;
         _identifierResolver = identifierResolver;
+        _resiliencePolicy = resiliencePolicy;
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
+        context.Request.EnableBuffering();
+
+
         var clientId = _identifierResolver.Resolve(context);
         if (clientId == null)
         {
-            context.Response.StatusCode = 401;
+            _logger.LogWarning("Unable to identify client, rejecting request.");
+            context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
             await context.Response.WriteAsync("Client identification required.");
             return;
         }
 
-        var userContext = context.Items["UserContext"] as UserContext; 
+        var userContext = context.Items["UserContext"] as UserContext;
+
 
         try
         {
-            var allowed = _rateLimiter.IsRequestAllowed(clientId, userContext , out var currentCount);
+            var allowed = _rateLimiter.IsRequestAllowed(clientId, userContext, out var currentCount);
             if (!allowed)
             {
-                _logger.LogWarning("Rate limit exceeded for {ClientType}:{ClientValue}. Count: {Count}",
-                    clientId.Type, clientId.Value, currentCount);
-                context.Response.StatusCode = 429 ; 
+                _logger.LogWarning(
+                    "Rate limit exceeded for {ClientType}:{ClientValue}. Count: {Count}, User: {UserId}",
+                    clientId.Type,
+                    clientId.Value,
+                    currentCount,
+                    userContext?.UserId ?? "anonymous");
+
+                context.Response.StatusCode = (int)HttpStatusCode.TooManyRequests;
                 context.Response.Headers["Retry-After"] = "60";
                 await context.Response.WriteAsync("429 Too Many Requests - Rate limit exceeded.");
                 return;
             }
-            _logger.LogInformation("Request allowed for {ClientType}:{ClientValue}. Count: {Count}",
-                clientId.Type, clientId.Value, currentCount);
+
+            _logger.LogInformation(
+                "Request allowed for {ClientType}:{ClientValue}. Count: {Count}, User: {UserId}",
+                clientId.Type,
+                clientId.Value,
+                currentCount,
+                userContext?.UserId ?? "anonymous");
         }
         catch (Exception ex) when (ex is RedisConnectionException || ex is TimeoutException)
         {
             _logger.LogError(ex, "Rate limiter unavailable (Redis down). Rejecting request.");
-            context.Response.StatusCode = 503 ; 
-            await context.Response.WriteAsync("503 Service Unavailable - Rate limiter unavailable.");
+            context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+            await context.Response.WriteAsync("503 Service Unavailable - Rate limiter temporarily unavailable.");
             return;
         }
 
@@ -81,111 +99,131 @@ public class GatewayMiddleware
             return;
         }
 
-        _logger.LogInformation("Forwarding request: {Method} {Path} -> {Target}",
-            context.Request.Method, requestPath, targetBaseUrl);
 
         try
         {
             var client = _httpClientFactory.CreateClient("GatewayClient");
-            client.Timeout = TimeSpan.FromSeconds(2);
+
+
             var targetUri = new Uri(new Uri(targetBaseUrl), requestPath);
-            var proxyRequest = new HttpRequestMessage(
-                new HttpMethod(context.Request.Method),
-                targetUri);
 
-            // Copy request headers, excluding Host
-            foreach (var header in context.Request.Headers)
-            {
-                if (header.Key.Equals("Host", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                proxyRequest.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
-            }
 
-            // Copy request body
-            if (context.Request.ContentLength > 0)
-            {
-                using var stream = new MemoryStream();
-                await context.Request.Body.CopyToAsync(stream);
-                stream.Position = 0;
-                proxyRequest.Content = new StreamContent(stream);
-
-                if (context.Request.Headers.ContainsKey("Content-Type"))
+            var response = await _resiliencePolicy.ExecuteAsync(
+                async (cancellationToken) =>
                 {
-                    proxyRequest.Content.Headers.TryAddWithoutValidation(
-                        "Content-Type",
-                        context.Request.Headers["Content-Type"].ToString());
-                }
-            }
 
-            using var proxyResponse = await client.SendAsync(
-                proxyRequest,
-                HttpCompletionOption.ResponseHeadersRead,
+                    var proxyRequest = new HttpRequestMessage(
+                        new HttpMethod(context.Request.Method),
+                        targetUri);
+
+
+                    foreach (var header in context.Request.Headers)
+                    {
+                        if (header.Key.Equals("Host", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        proxyRequest.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
+                    }
+
+                    if (context.Request.ContentLength > 0)
+                    {
+
+                        context.Request.Body.Position = 0;
+
+                        var streamContent = new StreamContent(context.Request.Body);
+                        if (context.Request.Headers.ContainsKey("Content-Type"))
+                        {
+                            streamContent.Headers.TryAddWithoutValidation(
+                                "Content-Type",
+                                context.Request.Headers["Content-Type"].ToString());
+                        }
+
+                        proxyRequest.Content = streamContent;
+                    }
+
+
+                    return await client.SendAsync(proxyRequest, HttpCompletionOption.ResponseHeadersRead
+, cancellationToken);
+                },
                 context.RequestAborted);
 
-            context.Response.StatusCode = (int)proxyResponse.StatusCode;
 
-            // Copy response headers safely (filtering hop-by-hop headers)
-            foreach (var header in proxyResponse.Headers)
+            context.Response.StatusCode = (int)response.StatusCode;
+
+
+            foreach (var header in response.Headers)
             {
-                if (IsAllowedResponseHeader(header.Key))
-                {
-                    context.Response.Headers[header.Key] = header.Value.ToArray();
-                }
-            }
-            foreach (var header in proxyResponse.Content.Headers)
-            {
-                if (IsAllowedResponseHeader(header.Key))
-                {
-                    context.Response.Headers[header.Key] = header.Value.ToArray();
-                }
+                context.Response.Headers[header.Key] = header.Value.ToArray();
             }
 
-            // Copy response body stream
-            if (proxyResponse.Content is not null)
+            foreach (var header in response.Content.Headers)
             {
-                await proxyResponse.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+                context.Response.Headers[header.Key] = header.Value.ToArray();
             }
 
-            _logger.LogInformation("Forwarded response with status: {StatusCode}", proxyResponse.StatusCode);
+
+            if (response.Content != null)
+            {
+                await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
+            }
+
+            _logger.LogInformation(
+                "Request forwarded to {Target} with status {StatusCode}",
+                targetBaseUrl,
+                response.StatusCode);
+        }
+        catch (BrokenCircuitException)
+        {
+
+            _logger.LogWarning("Circuit breaker is OPEN for service {Target}.", targetBaseUrl);
+            context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+            await context.Response.WriteAsync(
+                "503 Service Unavailable - Service temporarily blocked (circuit open).");
+        }
+        catch (Polly.Timeout.TimeoutRejectedException)
+        {
+
+            _logger.LogWarning("Request timed out after policy timeout for {Target}.", targetBaseUrl);
+            context.Response.StatusCode = (int)HttpStatusCode.GatewayTimeout;
+            await context.Response.WriteAsync("504 Gateway Timeout - Upstream service took too long.");
         }
         catch (TaskCanceledException) when (!context.RequestAborted.IsCancellationRequested)
         {
-            _logger.LogError("Request timed out after 2 seconds.");
+
+            _logger.LogWarning("Request cancelled due to timeout for {Target}.", targetBaseUrl);
             context.Response.StatusCode = (int)HttpStatusCode.GatewayTimeout;
-            await context.Response.WriteAsync("Gateway Timeout - upstream service did not respond.");
+            await context.Response.WriteAsync("504 Gateway Timeout - Upstream service took too long.");
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "Error forwarding request to upstream service.");
+
+            _logger.LogError(ex, "Error forwarding request to {Target}.", targetBaseUrl);
             context.Response.StatusCode = (int)HttpStatusCode.BadGateway;
-            await context.Response.WriteAsync("Bad Gateway - upstream service unavailable.");
+            await context.Response.WriteAsync("502 Bad Gateway - Upstream service unavailable.");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error during forwarding.");
-            context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
-            await context.Response.WriteAsync("Internal Server Error.");
-        }
-    }
 
-    private static bool IsAllowedResponseHeader(string headerName)
-    {
-        return !headerName.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase)
-            && !headerName.Equals("Connection", StringComparison.OrdinalIgnoreCase)
-            && !headerName.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase)
-            && !headerName.Equals("Upgrade", StringComparison.OrdinalIgnoreCase);
+            _logger.LogError(ex, "Unexpected error forwarding request to {Target}.", targetBaseUrl);
+            context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+            await context.Response.WriteAsync("500 Internal Server Error - An unexpected error occurred.");
+        }
     }
 
     private string? GetTargetUrl(string requestPath)
     {
         var routes = _configuration.GetSection("Routes").Get<Dictionary<string, string>>();
-        if (routes is null) return null;
+
+        if (routes == null)
+            return null;
+
 
         foreach (var route in routes)
         {
             if (requestPath.StartsWith(route.Key, StringComparison.OrdinalIgnoreCase))
                 return route.Value;
         }
+
         return null;
     }
 }

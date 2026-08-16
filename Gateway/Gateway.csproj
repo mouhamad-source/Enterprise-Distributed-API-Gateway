@@ -9,6 +9,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
     <InternalsVisibleTo Include="Gateway.Tests" />
+    <PackageReference Include="Polly" Version="8.7.0" />
     <PackageReference Include="StackExchange.Redis" Version="3.1.13" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.22.0" />
   </ItemGroup>

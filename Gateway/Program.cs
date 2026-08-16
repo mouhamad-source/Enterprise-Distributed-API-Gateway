@@ -4,14 +4,15 @@ using Gateway.Middleware;
 using Gateway.RateLimiting;
 using Gateway.Services;
 using Gateway.Identification; 
-using Gateway.Authentication; 
+using Gateway.Authentication;
+using Gateway.Resilience;
 
 var builder = WebApplication.CreateBuilder(args);
 
 
 builder.Services.AddHttpClient("GatewayClient", client =>
 {
-
+    client.Timeout = TimeSpan.FromSeconds(30); 
 });
 
 builder.Services.Configure<JwtSettings>(builder.Configuration.GetSection("JwtSettings"));
@@ -21,7 +22,9 @@ builder.Services.AddSingleton<JwtTokenValidator>();
 builder.Services.AddSingleton<RedisConnectionManager>();
 builder.Services.AddSingleton<IRateLimiter, RateLimiterService>();
 
-// builder.Services.AddSingleton<IRateLimiter, MemoryRateLimiter>();
+builder.Services.AddSingleton<IServiceResiliencePolicy, PollyResiliencePolicy>();
+
+
 builder.Services.AddSingleton<IPResolver>();
 
 builder.Services.AddSingleton<ApiKeyResolver>();
