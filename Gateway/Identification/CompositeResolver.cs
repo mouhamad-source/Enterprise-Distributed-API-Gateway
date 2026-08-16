@@ -16,9 +16,9 @@ public class CompositeResolver : IClientIdentifierResolver
     {
         return resolver switch
         {
-            JwtResolver => 1,
-            ApiKeyResolver => 2,
-            IPResolver => 3,
+            
+            ApiKeyResolver => 1,
+            IPResolver => 2,
             _ => 99
         };
     }

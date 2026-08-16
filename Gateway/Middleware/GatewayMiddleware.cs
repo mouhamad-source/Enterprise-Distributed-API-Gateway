@@ -6,6 +6,7 @@ using Gateway.RateLimiting;
 using Gateway.Interface.RateLimiting;
 using StackExchange.Redis;
 using Gateway.Identification;
+using Gateway.Authentication;
 
 namespace Gateway.Middleware;
 
@@ -39,20 +40,21 @@ public class GatewayMiddleware
         var clientId = _identifierResolver.Resolve(context);
         if (clientId == null)
         {
-            _logger.LogWarning("Unable to identify client, rejecting request.");
-            context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+            context.Response.StatusCode = 401;
             await context.Response.WriteAsync("Client identification required.");
             return;
         }
 
+        var userContext = context.Items["UserContext"] as UserContext; 
+
         try
         {
-            var allowed = _rateLimiter.IsRequestAllowed(clientId, out var currentCount);
+            var allowed = _rateLimiter.IsRequestAllowed(clientId, userContext , out var currentCount);
             if (!allowed)
             {
                 _logger.LogWarning("Rate limit exceeded for {ClientType}:{ClientValue}. Count: {Count}",
                     clientId.Type, clientId.Value, currentCount);
-                context.Response.StatusCode = (int)HttpStatusCode.TooManyRequests;
+                context.Response.StatusCode = 429 ; 
                 context.Response.Headers["Retry-After"] = "60";
                 await context.Response.WriteAsync("429 Too Many Requests - Rate limit exceeded.");
                 return;
@@ -63,7 +65,7 @@ public class GatewayMiddleware
         catch (Exception ex) when (ex is RedisConnectionException || ex is TimeoutException)
         {
             _logger.LogError(ex, "Rate limiter unavailable (Redis down). Rejecting request.");
-            context.Response.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+            context.Response.StatusCode = 503 ; 
             await context.Response.WriteAsync("503 Service Unavailable - Rate limiter unavailable.");
             return;
         }
