@@ -1,0 +1,9 @@
+{
+  "FeatureFlags": {
+    "SlidingWindow": false,
+    "EnableTracing": true,
+    "UseCircuitBreaker": true,
+    "EnableDetailedLogging": false,
+    "EnableCaching": false
+  }
+}
