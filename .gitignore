@@ -5,7 +5,7 @@ debug/
 release/
 logs/ 
 Logs/
-
+Reports 
 # Python build and cache
 __pycache__/
 *.pyc
