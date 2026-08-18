@@ -7,13 +7,57 @@ using Gateway.RateLimiting;
 using Gateway.Resilience;
 using Gateway.ServiceDiscovery;
 using Gateway.Services;
+using Gateway.Observability;
+using Serilog;
+using OpenTelemetry.Instrumentation.StackExchangeRedis;
+using OpenTelemetry.Exporter.Prometheus;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
 
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.WithProperty("Application", "Gateway")
+    .Enrich.WithProperty("Environment", builder.Environment.EnvironmentName)
+    .Enrich.FromLogContext()
+    .CreateLogger();
 
-var servicesSection = builder.Configuration.GetSection("Services");
-Console.WriteLine($"Services section exists: {servicesSection.Exists()}");
-Console.WriteLine($"Services section value: {servicesSection.GetValue<string>("UserService:Instances:0")}");
+builder.Host.UseSerilog();
+
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("Gateway"))
+    .WithTracing(tracing =>
+    {
+        tracing
+            .AddAspNetCoreInstrumentation(options =>
+            {
+                options.RecordException = true;
+
+                options.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/metrics") &&
+                                        !ctx.Request.Path.StartsWithSegments("/health");
+            })
+            .AddHttpClientInstrumentation()
+            .AddRedisInstrumentation()
+            .AddJaegerExporter(options =>
+            {
+                options.AgentHost = builder.Configuration["OpenTelemetry:Jaeger:AgentHost"] ?? "localhost";
+                options.AgentPort = int.Parse(builder.Configuration["OpenTelemetry:Jaeger:AgentPort"] ?? "6831");
+            })
+            .AddConsoleExporter();
+    })
+    .WithMetrics(metrics =>
+    {
+        metrics
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddPrometheusExporter(options =>
+            {
+                options.ScrapeEndpointPath = "/metrics";
+            });
+    });
 
 var routesSection = builder.Configuration.GetSection("Routes");
 Console.WriteLine($"Routes section exists: {routesSection.Exists()}");
@@ -69,12 +113,16 @@ builder.Services.AddSingleton<IClientIdentifierResolver>(sp =>
     return new CompositeResolver(resolvers);
 });
 
+
+builder.Services.AddSingleton<MetricsRegistry>();
+builder.Services.AddControllers();
 builder.Services.AddLogging();
 
 var app = builder.Build();
 
 app.UseHttpsRedirection();
-
+app.UseOpenTelemetryPrometheusScrapingEndpoint();
+app.UseMiddleware<CorrelationIdMiddleware>();
 
 using (var scope = app.Services.CreateScope())
 {
@@ -84,5 +132,5 @@ using (var scope = app.Services.CreateScope())
 
 app.UseMiddleware<AuthenticationMiddleware>();
 app.UseMiddleware<GatewayMiddleware>();
-
+app.MapControllers();
 app.Run();

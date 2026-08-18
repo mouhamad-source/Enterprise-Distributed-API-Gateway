@@ -3,6 +3,8 @@ bin/
 obj/
 debug/
 release/
+logs/ 
+Logs/
 
 # Python build and cache
 __pycache__/
