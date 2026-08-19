@@ -175,10 +175,11 @@ enterprise-gateway/
 ├── benchmarks/               # Performance results and comparisons
 └── README.md                 # You are here!
 
+````
 
----
 
-## 📚 Documentation & Operations
+
+### 📚 Documentation & Operations
 
 - **🧠 Architecture Decisions** – See the [`/docs/adr`](./docs/adr) folder for detailed trade-offs and rationales.
 - **📘 Operations Runbook** – Comprehensive guide for production operations, incident response, and recovery ([`docs/runbook.md`](./docs/runbook.md)).
