@@ -150,7 +150,7 @@ builder.Configuration.AddJsonFile("featureflags.json", optional: true, reloadOnC
 
 builder.Services.AddControllers();
 
-
+// builder.Services.AddControllers();
 builder.Services.AddLogging();
 
 
@@ -191,7 +191,7 @@ lifetime.ApplicationStopped.Register(() =>
 });
 
 
-app.UseMiddleware<CorrelationIdMiddleware>();
+// app.UseMiddleware<CorrelationIdMiddleware>();
 
 
 using (var scope = app.Services.CreateScope())
@@ -201,12 +201,16 @@ using (var scope = app.Services.CreateScope())
 }
 
 
-app.UseMiddleware<HealthCheckMiddleware>();   // /health
-app.UseMiddleware<ReadinessMiddleware>();    // /ready
 
 
+
+
+app.UseMiddleware<HealthCheckMiddleware>();
+app.UseMiddleware<ReadinessMiddleware>();
+app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseMiddleware<AuthenticationMiddleware>();
 app.UseMiddleware<GatewayMiddleware>();
+app.MapControllers();
 
 
 app.MapControllers();

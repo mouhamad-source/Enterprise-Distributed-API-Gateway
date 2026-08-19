@@ -1,0 +1,164 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # Redis - Distributed Cache
+  # ==========================================
+  redis:
+    image: redis:alpine
+    container_name: redis
+    ports:
+      - "6500:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # UserService - 3 Instances
+  # ==========================================
+  userservice1:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/Dockerfile.userservice
+    container_name: userservice1
+    ports:
+      - "5001:80"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=users;Username=admin;Password=admin123
+    networks:
+      - gateway-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  userservice2:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/Dockerfile.userservice
+    container_name: userservice2
+    ports:
+      - "5002:80"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=users;Username=admin;Password=admin123
+    networks:
+      - gateway-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  userservice3:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/Dockerfile.userservice
+    container_name: userservice3
+    ports:
+      - "5003:80"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=postgres;Database=users;Username=admin;Password=admin123
+    networks:
+      - gateway-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ==========================================
+  # API Gateway
+  # ==========================================
+  gateway:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/Dockerfile.gateway
+    container_name: gateway
+    ports:
+      - "5000:80"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - Redis__ConnectionString=redis:6379,abortConnect=false
+      - Routes__/users=UserService
+      - Services__UserService__Instances__0=http://userservice1
+      - Services__UserService__Instances__1=http://userservice2
+      - Services__UserService__Instances__2=http://userservice3
+      - OpenTelemetry__Jaeger__AgentHost=jaeger
+    depends_on:
+      userservice1:
+        condition: service_healthy
+      userservice2:
+        condition: service_healthy
+      userservice3:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # ==========================================
+  # Jaeger - Distributed Tracing
+  # ==========================================
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "6831:6831/udp" # Agent
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # Prometheus - Metrics Collection
+  # ==========================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - gateway-network
+
+  # ==========================================
+  # Grafana - Dashboard
+  # ==========================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - gateway-network
+
+networks:
+  gateway-network:
+    driver: bridge
+
+volumes:
+  grafana_data:

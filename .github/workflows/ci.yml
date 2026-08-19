@@ -1,0 +1,87 @@
+name: CI - Build & Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  PROJECT_PATH: './src/Gateway/Gateway.csproj'
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Restore Dependencies
+      run: dotnet restore ${{ env.PROJECT_PATH }}
+
+    - name: Build Solution
+      run: dotnet build --configuration Release --no-restore
+
+    - name: Run Unit Tests
+      run: dotnet test ./tests/Unit/*.csproj --configuration Release --no-build --verbosity normal
+
+    - name: Run Integration Tests
+      run: dotnet test ./tests/Integration/*.csproj --configuration Release --no-build --verbosity normal
+
+    - name: Run Performance Tests (Quick)
+      run: dotnet test ./tests/Performance/*.csproj --configuration Release --no-build --verbosity normal
+
+    - name: Publish Gateway
+      run: dotnet publish ./src/Gateway/Gateway.csproj -c Release -o ./publish
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: gateway-build
+        path: ./publish/
+        retention-days: 7
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: ./TestResults/
+        retention-days: 7
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Run Security Scan
+      uses: dotnet/security-scan@v1
+      with:
+        project: ./src/Gateway/
+        output: security-report.json
+
+    - name: Upload Security Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-report
+        path: security-report.json

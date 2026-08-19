@@ -171,41 +171,45 @@ public class GatewayMiddleware
             try
             {
                 var response = await _resiliencePolicy.ExecuteAsync(
-                    async (cancellationToken) =>
-                    {
-                        return await _reverseProxy.ForwardAsync(
-                            context,
-                            selectedInstance,
-                            cancellationToken);
-                    },
-                    context.RequestAborted);
+    async (cancellationToken) =>
+    {
+        return await _reverseProxy.ForwardAsync(
+            context,
+            selectedInstance,
+            cancellationToken);
+    },
+    context.RequestAborted);
 
                 statusCode = (int)response.StatusCode;
                 context.Response.StatusCode = statusCode;
 
-
+                // Copy headers, but skip Transfer-Encoding and Content-Length from upstream
                 foreach (var header in response.Headers)
                 {
+                    if (header.Key.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     context.Response.Headers[header.Key] = header.Value.ToArray();
                 }
 
                 foreach (var header in response.Content.Headers)
                 {
+                    if (header.Key.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase) ||
+                        header.Key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     context.Response.Headers[header.Key] = header.Value.ToArray();
                 }
 
-
                 if (response.Content != null)
                 {
-                    await response.Content.CopyToAsync(context.Response.Body, context.RequestAborted);
-                }
+                    var bytes = await response.Content.ReadAsByteArrayAsync(context.RequestAborted);
 
-                _logger.LogInformation(
-                    "Request forwarded to {Instance} with status {StatusCode}, Path: {Path}, Method: {Method}",
-                    selectedInstance,
-                    response.StatusCode,
-                    requestPath,
-                    method);
+                    // Now set Content-Length AFTER buffering the full body
+                    context.Response.ContentLength = bytes.Length;
+
+                    await context.Response.Body.WriteAsync(bytes, 0, bytes.Length, context.RequestAborted);
+                }
             }
             catch (BrokenCircuitException)
             {
